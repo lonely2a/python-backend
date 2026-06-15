@@ -197,7 +197,7 @@ class MT5Service:
 
     async def get_positions(self, symbol: Optional[str] = None) -> list[Dict[str, Any]]:
         """
-        获取当前持仓
+        获取当前持仓（使用实时价格）
 
         Args:
             symbol: 交易品种,可选
@@ -214,19 +214,24 @@ class MT5Service:
             if positions is None:
                 return []
 
-            return [
-                {
+            result = []
+            for pos in positions:
+                # 获取实时市场价格
+                tick = mt5.symbol_info_tick(pos.symbol)
+                current_price = float(tick.bid if tick else pos.price_current)
+                
+                result.append({
                     "ticket": pos.ticket,
                     "symbol": pos.symbol,
                     "type": "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL",
                     "volume": float(pos.volume),
                     "price_open": float(pos.price_open),
-                    "price_current": float(pos.price_current),
+                    "price_current": current_price,
                     "profit": float(pos.profit),
                     "time": datetime.fromtimestamp(pos.time).isoformat()
-                }
-                for pos in positions
-            ]
+                })
+            
+            return result
 
         except Exception as e:
             logger.error(f"获取持仓失败: {str(e)}")
@@ -416,12 +421,11 @@ class MT5Service:
         enable_trailing_stop: bool = True
     ) -> Dict[str, Any]:
         """
-        应用移动止损策略（新规则）
+        应用移动止损策略（按美元价格规则）
         
-        新规则：
-        - 盈利400-600点：止损移至开仓价+10点
-        - 盈利600-1500点：止损移至开仓价+100点
-        - 盈利≥1500点：直接平仓止盈
+        新规则（按美元价格差）：
+        - 盈利≥400美元且<700美元：止损移至开仓价+10美元
+        - 盈利≥700美元：止损移至开仓价+100美元
 
         Args:
             ticket: 持仓票号
@@ -430,7 +434,7 @@ class MT5Service:
         Returns:
             dict: {
                 "success": bool,
-                "action": "adjusted" | "skipped" | "failed" | "closed",
+                "action": "adjusted" | "skipped" | "failed",
                 "message": str,
                 "old_sl": float,
                 "new_sl": float
@@ -476,15 +480,23 @@ class MT5Service:
             current_sl = pos.sl if pos.sl else 0.0
             position_type = pos.type  # 0=BUY, 1=SELL
             
-            # 计算当前盈利点数
+            # 计算当前盈利金额（美元）
             if position_type == mt5.POSITION_TYPE_BUY:
-                profit_points = (current_price - open_price) / point
+                profit_usd = current_price - open_price
             else:  # SELL
-                profit_points = (open_price - current_price) / point
+                profit_usd = open_price - current_price
             
-            # 【新增】检查是否达到直接平仓条件（≥1500点）
-            if profit_points >= 1500:
-                logger.info(f"🎯 盈利{profit_points:.0f}点 ≥ 1500点，执行直接平仓止盈: Ticket {ticket}")
+            # 调试日志：记录详细价格信息
+            logger.debug(
+                f"移动止损计算: Ticket {ticket}, "
+                f"{pos.symbol}, 类型={'BUY' if position_type == 0 else 'SELL'}, "
+                f"开仓价={open_price:.2f}, 当前价={current_price:.2f}, "
+                f"盈利={profit_usd:.2f}美元"
+            )
+            
+            # 🎯 盈利≥1500美元直接平仓止盈
+            if profit_usd >= 1500:
+                logger.info(f"🎯 盈利{profit_usd:.0f}美元 ≥ 1500美元，执行直接平仓止盈: Ticket {ticket}")
                 
                 # 准备平仓请求
                 tick = mt5.symbol_info_tick(pos.symbol)
@@ -506,7 +518,7 @@ class MT5Service:
                     "price": tick.bid if position_type == mt5.POSITION_TYPE_BUY else tick.ask,
                     "deviation": 20,
                     "magic": pos.magic,
-                    "comment": "Take Profit by Trailing Stop",
+                    "comment": "Auto Close by Trailing Stop",
                     "type_time": mt5.ORDER_TIME_GTC,
                     "type_filling": mt5.ORDER_FILLING_IOC,
                 }
@@ -523,48 +535,48 @@ class MT5Service:
                         "new_sl": 0
                     }
                 
-                logger.info(f"✅ 直接平仓成功: Ticket {ticket}, 盈利{profit_points:.0f}点")
+                logger.info(f"✅ 直接平仓成功: Ticket {ticket}, 盈利{profit_usd:.2f}美元")
                 return {
                     "success": True,
                     "action": "closed",
-                    "message": f"盈利{profit_points:.0f}点 ≥ 1500点，已直接平仓止盈",
+                    "message": f"盈利{profit_usd:.2f}美元 ≥ 1500美元，已直接平仓止盈",
                     "old_sl": current_sl,
                     "new_sl": 0,
-                    "profit_points": profit_points
+                    "profit_usd": profit_usd
                 }
             
-            # 检查是否达到最小触发条件（400点）
-            if profit_points < 400:
+            # 检查是否达到最小触发条件（400美元）
+            if profit_usd < 400:
                 return {
                     "success": True,
                     "action": "skipped",
-                    "message": f"盈利{profit_points:.0f}点 < 400点，未达到触发条件",
+                    "message": f"盈利{profit_usd:.2f}美元 < 400美元，未达到触发条件",
                     "old_sl": current_sl,
                     "new_sl": current_sl
                 }
             
-            # 根据盈利区间计算新的止损价格
-            if 400 <= profit_points < 600:
-                # 盈利400-600点：止损移至开仓价+10点
-                lock_profit_points = 10
-            elif profit_points >= 600:
-                # 盈利600-1500点：止损移至开仓价+100点
-                lock_profit_points = 100
+            # 根据盈利区间计算新的止损价格（按美元）
+            if 400 <= profit_usd < 700:
+                # 盈利400-700美元：止损移至开仓价+10美元
+                lock_profit_usd = 10
+            elif profit_usd >= 700:
+                # 盈利≥700美元：止损移至开仓价+100美元
+                lock_profit_usd = 100
             else:
                 # 不应该到这里，但以防万一
                 return {
                     "success": True,
                     "action": "skipped",
-                    "message": f"盈利{profit_points:.0f}点不在有效范围内",
+                    "message": f"盈利{profit_usd:.2f}美元不在有效范围内",
                     "old_sl": current_sl,
                     "new_sl": current_sl
                 }
             
-            # 计算新的止损价格
+            # 计算新的止损价格（直接按美元加减）
             if position_type == mt5.POSITION_TYPE_BUY:
-                new_sl = open_price + (lock_profit_points * point)
+                new_sl = open_price + lock_profit_usd
             else:  # SELL
-                new_sl = open_price - (lock_profit_points * point)
+                new_sl = open_price - lock_profit_usd
             
             # 检查是否需要调整止损
             should_adjust = False
@@ -618,18 +630,18 @@ class MT5Service:
             
             logger.info(
                 f"✅ 移动止损成功: Ticket {ticket}, "
-                f"{pos.symbol}, 盈利{profit_points:.0f}点, "
-                f"止损 {current_sl:.2f} → {new_sl:.2f} (锁定{lock_profit_points}点)"
+                f"{pos.symbol}, 盈利{profit_usd:.2f}美元, "
+                f"止损 {current_sl:.2f} → {new_sl:.2f} (锁定{lock_profit_usd}美元)"
             )
             
             return {
                 "success": True,
                 "action": "adjusted",
-                "message": f"移动止损成功: 盈利{profit_points:.0f}点, 止损调整为{new_sl:.2f} (锁定{lock_profit_points}点)",
+                "message": f"移动止损成功: 盈利{profit_usd:.2f}美元, 止损调整为{new_sl:.2f} (锁定{lock_profit_usd}美元)",
                 "old_sl": current_sl,
                 "new_sl": new_sl,
-                "profit_points": profit_points,
-                "lock_profit_points": lock_profit_points
+                "profit_usd": profit_usd,
+                "lock_profit_usd": lock_profit_usd
             }
 
         except Exception as e:

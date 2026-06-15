@@ -56,6 +56,7 @@ class Position(BaseModel):
     type: str  # BUY or SELL
     volume: float
     price_open: float
+    price_current: Optional[float] = None  # 当前市场价格
     profit: float
     time: datetime
 

@@ -18,10 +18,10 @@ trailing_stop_task: Optional[asyncio.Task] = None
 async def trailing_stop_background_task(interval_seconds: int = 120):
     """
     移动止损后台任务
-    每interval_seconds秒检查一次持仓并应用移动止损（新规则）
+    每interval_seconds秒检查一次持仓并应用移动止损（按美元价格规则）
     """
     logger.info(f" 移动止损后台任务启动，检查间隔: {interval_seconds}秒")
-    logger.info(f" 策略规则: 400-600点→开仓价+10点; 600-1500点→开仓价+100点; ≥1500点→直接平仓")
+    logger.info(f" 策略规则: ≥400美元→开仓价+10美元; ≥700美元→开仓价+100美元; ≥1500美元→直接平仓")
     
     while True:
         try:
@@ -37,11 +37,6 @@ async def trailing_stop_background_task(interval_seconds: int = 120):
                     f"✅ 移动止损: 调整{result['adjusted']}个持仓, "
                     f"跳过{result['skipped']}个, 失败{result['failed']}个"
                 )
-            
-            # 检查是否有直接平仓的订单
-            closed_count = sum(1 for d in result.get("details", []) if d.get("action") == "closed")
-            if closed_count > 0:
-                logger.info(f"🎯 直接平仓: {closed_count}个持仓达到≥1500点止盈条件")
                 
         except Exception as e:
             logger.error(f"移动止损后台任务异常: {str(e)}")
