@@ -22,10 +22,20 @@ async def trailing_stop_background_task(interval_seconds: int = 120):
     """
     logger.info(f" 移动止损后台任务启动，检查间隔: {interval_seconds}秒")
     logger.info(f" 策略规则: ≥400美元→开仓价+10美元; ≥700美元→开仓价+100美元; ≥1500美元→直接平仓")
+    logger.info(f" 强制止损规则: 总亏损≥100美元→自动平仓所有持仓")
     
     while True:
         try:
             await asyncio.sleep(interval_seconds)
+            
+            # 先检查强制止损条件
+            forced_stop_result = await mt5_service.check_forced_stop_loss(max_total_loss_usd=100.0)
+            
+            if forced_stop_result.get("triggered", False):
+                logger.warning(
+                    f"⚠️ 强制止损已触发: {forced_stop_result['message']}"
+                )
+                continue  # 如果触发了强制止损，跳过本次移动止损检查
             
             # 执行移动止损检查（使用新的enable_trailing_stop参数）
             result = await mt5_service.check_and_apply_trailing_stops(

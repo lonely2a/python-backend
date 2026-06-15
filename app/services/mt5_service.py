@@ -654,6 +654,81 @@ class MT5Service:
                 "new_sl": 0
             }
 
+    async def check_forced_stop_loss(self, max_total_loss_usd: float = 100.0) -> Dict[str, Any]:
+        """
+        检查强制止损条件：如果所有持仓的总亏损达到指定金额，触发强制平仓
+        
+        Args:
+            max_total_loss_usd: 最大允许总亏损金额（美元），默认100美元
+            
+        Returns:
+            dict: {
+                "triggered": bool,  # 是否触发强制止损
+                "total_profit": float,  # 当前总盈亏
+                "max_loss": float,  # 最大允许亏损
+                "closed_count": int,  # 成功平仓数量
+                "failed_count": int,  # 失败数量
+                "message": str
+            }
+        """
+        try:
+            positions = await self.get_positions()
+            
+            if not positions:
+                return {
+                    "triggered": False,
+                    "total_profit": 0.0,
+                    "max_loss": max_total_loss_usd,
+                    "closed_count": 0,
+                    "failed_count": 0,
+                    "message": "无持仓，无需检查"
+                }
+            
+            # 计算所有持仓的总盈亏
+            total_profit = sum(pos["profit"] for pos in positions)
+            
+            logger.info(f"强制止损检查: 总盈亏={total_profit:.2f}美元, 阈值=-{max_total_loss_usd:.2f}美元")
+            
+            # 检查是否达到强制止损条件
+            if total_profit <= -max_total_loss_usd:
+                logger.warning(f"⚠️ 触发强制止损! 总亏损{total_profit:.2f}美元 ≤ -{max_total_loss_usd:.2f}美元")
+                
+                # 执行一键平仓
+                close_result = await self.close_all_positions()
+                
+                return {
+                    "triggered": True,
+                    "total_profit": total_profit,
+                    "max_loss": max_total_loss_usd,
+                    "closed_count": close_result.get("success", 0),
+                    "failed_count": close_result.get("failed", 0),
+                    "skipped_count": close_result.get("skipped_by_strategy", 0),
+                    "message": f"强制止损已触发: 总亏损{total_profit:.2f}美元，已平仓{close_result.get('success', 0)}个持仓"
+                }
+            else:
+                remaining = max_total_loss_usd + total_profit
+                return {
+                    "triggered": False,
+                    "total_profit": total_profit,
+                    "max_loss": max_total_loss_usd,
+                    "remaining": remaining,
+                    "closed_count": 0,
+                    "failed_count": 0,
+                    "message": f"总盈亏{total_profit:.2f}美元，距离强制止损还有{remaining:.2f}美元"
+                }
+                
+        except Exception as e:
+            logger.error(f"强制止损检查异常: {str(e)}")
+            return {
+                "triggered": False,
+                "total_profit": 0.0,
+                "max_loss": max_total_loss_usd,
+                "closed_count": 0,
+                "failed_count": 0,
+                "error": str(e),
+                "message": f"强制止损检查失败: {str(e)}"
+            }
+
     async def check_and_apply_trailing_stops(
         self,
         enable_trailing_stop: bool = True
