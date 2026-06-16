@@ -81,7 +81,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # 开发环境允许所有来源,生产环境需要限制
-    allow_credentials=True,
+    allow_credentials=False,  # 与 allow_origins=["*"] 配合使用时必须为 False
     allow_methods=["*"],
     allow_headers=["*"],
 )
